@@ -45,10 +45,12 @@ NSFW Rating: {rating_tag_text}
 
 async def nl_llm_tag(few_shot_examples, image_metadata_path_tuple, session, api_url, model_name):
     metadata = utils.get_metadata(image_metadata_path_tuple[1])
-    async with session.post(api_url, json={
-        "model": model_name, "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE, "top_p": TOP_P,
-        "messages": [
-            {"role": "system", "content": """Describe the given image for a request from the user using the provided tags as ground truth.
+    for i in range(1, MAX_RETRY + 2): # 1 indexed.
+        try:
+            async with session.post(api_url, json={
+                "model": model_name, "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE, "top_p": TOP_P,
+                "messages": [
+                    {"role": "system", "content": """Describe the given image for a request from the user using the provided tags as ground truth.
 "unknown" tag means the name can't be found, so you shouldn't mention it. If there are conflict between your image view and the tags, adhere to the tags.
 You should include the artist(s), character(s), copyright source(s), and NSFW rating which are specified along the image in your response, for names, you should capitalize first letter to follow grammar rules.
 Don't say the image is anime, illustration, etc., just describe what it has. Because it's assumed that most images are anime, except when the tags specify it's from real life then you should mention it.
@@ -60,11 +62,18 @@ Never start your response with "The image depicts...", imagine you are directly 
 For example, lets say if an image has a cat girl doing some things, you should start with "A cat girl with (appearance) doing (things)...", but don't follow this exactly, be creative.
 Your response should be long and detailed, containing background scene description, character position, pose, and more too if there's any, basically include everything the tags have told you.
 Don't use new lines, put your entire response into a single line. Start the description immediately, don't add starter or ending extra texts."""},
-            *few_shot_examples,
-            await get_user_prompt(metadata, image_metadata_path_tuple[0]),
-        ],
-    }) as response:
-        j = await response.json()
+                    *few_shot_examples,
+                    await get_user_prompt(metadata, image_metadata_path_tuple[0]),
+                ],
+            }) as response:
+                response.raise_for_status()
+                j = await response.json()
+            break
+        except Exception as e:
+            if i > MAX_RETRY:
+                raise RuntimeError(f"All retry attempts failed for \"{image_metadata_path_tuple[0]}\"! Final error {e.__class__.__name__}: {e}") from e
+            tqdm.tqdm.write(f"A {e.__class__.__name__} occurred for \"{image_metadata_path_tuple[0]}\": {e}\nPausing for 0.1 second before retrying attempt {i}/{MAX_RETRY}...")
+
     choice = j["choices"][0]
     # tqdm.tqdm.write(f"Request for image \"{image_metadata_path_tuple[0]}\" token usage (input -> output): {j["usage"]["prompt_tokens"]} -> {j["usage"]["completion_tokens"]}")
     if choice["finish_reason"] == "length":
@@ -103,7 +112,7 @@ async def main():
     print("Got", image_count, "images.")
 
     tasks = []
-    async with utils.get_session() as session:
+    async with utils.get_session(0) as session:
         with tqdm.tqdm(total=image_count, desc="Requesting") as pbar:
             for image_metadata_path_tuple in image_id_image_metadata_path_tuple_dict.values():
                 while len(tasks) >= args.concurrency:
@@ -111,6 +120,9 @@ async def main():
                     for i in range(len(tasks) - 1, -1, -1):
                         task = tasks[i]
                         if task.done():
+                            exception = task.exception()
+                            if exception is not None:
+                                raise exception
                             del tasks[i]
                             pbar.update(1)
                 tasks.append(asyncio.create_task(nl_llm_tag(few_shot_examples, image_metadata_path_tuple, session, args.api, args.model)))
@@ -120,6 +132,9 @@ async def main():
                 for i in range(len(tasks) - 1, -1, -1):
                     task = tasks[i]
                     if task.done():
+                        exception = task.exception()
+                        if exception is not None:
+                            raise exception
                         del tasks[i]
                         pbar.update(1)
 
