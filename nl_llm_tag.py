@@ -73,6 +73,7 @@ Don't use new lines, put your entire response into a single line. Start the desc
             if i > MAX_RETRY:
                 raise RuntimeError(f"All retry attempts failed for \"{image_metadata_path_tuple[0]}\"! Final error {e.__class__.__name__}: {e}") from e
             tqdm.tqdm.write(f"A {e.__class__.__name__} occurred for \"{image_metadata_path_tuple[0]}\": {e}\nPausing for 0.1 second before retrying attempt {i}/{MAX_RETRY}...")
+            await asyncio.sleep(0.1)
 
     choice = j["choices"][0]
     # tqdm.tqdm.write(f"Request for image \"{image_metadata_path_tuple[0]}\" token usage (input -> output): {j["usage"]["prompt_tokens"]} -> {j["usage"]["completion_tokens"]}")
@@ -120,9 +121,7 @@ async def main():
                     for i in range(len(tasks) - 1, -1, -1):
                         task = tasks[i]
                         if task.done():
-                            exception = task.exception()
-                            if exception is not None:
-                                raise exception
+                            await task
                             del tasks[i]
                             pbar.update(1)
                 tasks.append(asyncio.create_task(nl_llm_tag(few_shot_examples, image_metadata_path_tuple, session, args.api, args.model)))
@@ -132,9 +131,7 @@ async def main():
                 for i in range(len(tasks) - 1, -1, -1):
                     task = tasks[i]
                     if task.done():
-                        exception = task.exception()
-                        if exception is not None:
-                            raise exception
+                        await task
                         del tasks[i]
                         pbar.update(1)
 
