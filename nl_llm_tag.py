@@ -11,7 +11,7 @@ import mimetypes
 from constants import *
 
 FEW_SHOT_EXAMPLES_PATH = "nl_llm_tag_few_shot_examples"
-MAX_TOKENS = 2048
+MAX_TOKENS = 4096
 TEMPERATURE = 0.1
 TOP_P = 0.9
 
@@ -43,12 +43,18 @@ NSFW Rating: {rating_tag_text}
 \"\"\""""},
     ]}
 
-async def nl_llm_tag(few_shot_examples, image_metadata_path_tuple, session, api_url, model_name):
+async def nl_llm_tag(few_shot_examples, image_metadata_path_tuple, session, api_url, api_key, model_name):
     metadata = utils.get_metadata(image_metadata_path_tuple[1])
     for i in range(1, MAX_RETRY + 2): # 1 indexed.
         try:
-            async with session.post(api_url, json={
-                "model": model_name, "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE, "top_p": TOP_P,
+            post_extra_json = {}
+            if "gemini-2.5-pro" in model_name:
+                if model_name == "google/gemini-2.5-pro-preview":
+                    post_extra_json.update({"provider": {"only": ["Google"]}, "reasoning": {"max_tokens": 0}})
+            else:
+                post_extra_json["max_tokens"] = MAX_TOKENS
+            async with session.post(api_url, headers=None if api_key is None else {"Authorization": "Bearer " + api_key}, json={
+                "model": model_name, "temperature": TEMPERATURE, "top_p": TOP_P,
                 "messages": [
                     {"role": "system", "content": """Describe the given image for a request from the user using the provided tags as ground truth.
 "unknown" tag means the name can't be found, so you shouldn't mention it. If there are conflict between your image view and the tags, adhere to the tags.
@@ -65,6 +71,7 @@ Don't use new lines, put your entire response into a single line. Start the desc
                     *few_shot_examples,
                     await get_user_prompt(metadata, image_metadata_path_tuple[0]),
                 ],
+                **post_extra_json
             }) as response:
                 response.raise_for_status()
                 j = await response.json()
@@ -77,8 +84,9 @@ Don't use new lines, put your entire response into a single line. Start the desc
 
     choice = j["choices"][0]
     # tqdm.tqdm.write(f"Request for image \"{image_metadata_path_tuple[0]}\" token usage (input -> output): {j["usage"]["prompt_tokens"]} -> {j["usage"]["completion_tokens"]}")
-    if choice["finish_reason"] == "length":
-        raise RuntimeError(f"Request for \"{image_metadata_path_tuple[0]}\" finished too early!")
+    finish_reason = (choice.get("native_finish_reason") or choice["finish_reason"]).lower()
+    if finish_reason != "stop":
+        raise RuntimeError(f"Request for \"{image_metadata_path_tuple[0]}\" finished with reason \"{finish_reason}\"!")
     metadata["nl_desc"] = choice["message"]["content"]
     async with aiofiles.open(image_metadata_path_tuple[1], "w", encoding="utf8") as result_metadata_file:
         await result_metadata_file.write(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
@@ -86,12 +94,13 @@ Don't use new lines, put your entire response into a single line. Start the desc
 def parse_args():
     parser = argparse.ArgumentParser(description="Tag images with natural language using a LLM.")
     parser.add_argument("-a", "--api", default="http://127.0.0.1:12345/v1", help="OpenAI compatible API URL prefix, default to http://127.0.0.1:12345/v1")
+    parser.add_argument("-k", "--key", help="API key for the API")
     parser.add_argument("-m", "--model", default="gpt-4-1106-preview", help="Model name to use, default to gpt-4-1106-preview")
     parser.add_argument("-c", "--concurrency", type=int, default=MAX_TASKS, help=f"Max concurrent requests, default to {MAX_TASKS}")
     args = parser.parse_args()
     args.api += "/chat/completions"
     if args.concurrency < 1:
-        print("Max concurrent requests must be at least 1!")
+        print("Max concurrent requests must be positive!")
         sys.exit(1)
     return args
 
@@ -124,7 +133,7 @@ async def main():
                             await task
                             del tasks[i]
                             pbar.update(1)
-                tasks.append(asyncio.create_task(nl_llm_tag(few_shot_examples, image_metadata_path_tuple, session, args.api, args.model)))
+                tasks.append(asyncio.create_task(nl_llm_tag(few_shot_examples, image_metadata_path_tuple, session, args.api, args.key, args.model)))
 
             while tasks:
                 await asyncio.sleep(0.1)
